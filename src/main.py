@@ -5,11 +5,12 @@ import time
 import sys
 import subprocess # Import subprocess
 import itertools
+import re
 from git_utils import get_merge_base, get_file_from_commit
 from llm_api import get_merge_candidates, refine_merge_candidate
 # Import the new function
 from java_handler import process_and_save_run, run_tooling_and_compile
-from ast_utils import find_conflicting_methods
+from ast_utils import find_conflicting_methods, get_method_name, get_method_calls
 from prompt_builder import build_prompt, build_method_prompt, build_report_prompt
 
 # === Config ===
@@ -83,7 +84,7 @@ else:
     else:
         print("✅ Got code from Git versions (Base, A, B).")
 
-# === Step 3: Decompose and Find Conflicts (NEW LOGIC) ===
+# === Step 3: Decompose and Find Conflicts ===
 print("\nDecomposing code using AST to find method-level conflicts...")
 conflicting_methods = find_conflicting_methods(base_code, a_code, b_code)
 
@@ -91,62 +92,127 @@ if not conflicting_methods:
     print("[✅] No semantic method-level conflicts found via AST. Exiting.")
     sys.exit(0)
 
-print(f"Found {len(conflicting_methods)} conflicting method(s): {list(conflicting_methods.keys())}")
+print(f"Found {len(conflicting_methods)} conflicting method(s).")
 
-# Dictionary to store LLM generated candidates for each method
-method_candidates = {}
+# === Step 3.5: Interprocedural Call-Graph Clustering (AST-Powered) ===
+print("\nBuilding Interprocedural Call-Graph Clusters via AST...")
 
-# === Step 4: Call LLM per Method ===
-for sig, codes in conflicting_methods.items():
-    print(f"\nCalling LLM for method: {sig}")
-    prompt = build_method_prompt(sig, codes["base"], codes["A"], codes["B"], base_code)
+signatures = list(conflicting_methods.keys())
+adj_list = {sig: set() for sig in signatures}
+
+# Build adjacency list based on AST method invocations
+for i, sig1 in enumerate(signatures):
+    name1 = get_method_name(sig1)
+    
+    for j, sig2 in enumerate(signatures):
+        if i == j: continue
+        
+        # Combine the code of Base, A, and B for sig2 to check all possible calls
+        code2_combined = conflicting_methods[sig2]['base'] + "\n" + conflicting_methods[sig2]['A'] + "\n" + conflicting_methods[sig2]['B']
+        
+        # Use our new AST function to get all methods called inside sig2
+        calls_inside_sig2 = get_method_calls(code2_combined)
+        
+        # If sig2 calls sig1, they interact! Link them.
+        if name1 in calls_inside_sig2:
+            adj_list[sig1].add(sig2)
+            adj_list[sig2].add(sig1) # Undirected graph for clustering
+
+# Find connected components (Clusters)
+visited = set()
+clusters = []
+for sig in signatures:
+    if sig not in visited:
+        cluster = []
+        queue = [sig]
+        while queue:
+            curr = queue.pop(0)
+            if curr not in visited:
+                visited.add(curr)
+                cluster.append(curr)
+                queue.extend(list(adj_list[curr] - visited))
+        clusters.append(cluster)
+
+for idx, cluster in enumerate(clusters, 1):
+    print(f"  Cluster {idx}: {cluster}")
+
+# === Step 4: Call LLM per CLUSTER (Not per method) ===
+cluster_candidates = {} # Format: { cluster_idx: [ {sig1: code, sig2: code}, ... ] }
+
+for cluster_idx, cluster_sigs in enumerate(clusters):
+    print(f"\nCalling LLM for Cluster {cluster_idx + 1} ({len(cluster_sigs)} methods)...")
+    
+    prompt = build_cluster_prompt(cluster_sigs, conflicting_methods, base_code)
     
     start = time.time()
     result = get_merge_candidates(prompt)
     print(f"Completed in {time.time() - start:.2f} seconds.")
     
     if result:
-        # Split candidates and clean up markdown blocks if the LLM added them
-        cands = [c.strip().replace("```java", "").replace("```", "") for c in result.split(MERGE_SEPARATOR) if c.strip()]
-        method_candidates[sig] = cands
+        # Split candidates
+        raw_cands = [c.strip() for c in result.split(MERGE_SEPARATOR) if c.strip()]
+        parsed_cands = []
+        
+        for raw_cand in raw_cands:
+            cand_dict = {}
+            # Parse the XML-like tags the LLM was instructed to use
+            for sig in cluster_sigs:
+                # Regex to extract code between <method name="sig"> and </method>
+                pattern = r'<method\s+name="' + re.escape(sig) + r'">\s*(.*?)\s*</method>'
+                match = re.search(pattern, raw_cand, re.DOTALL)
+                if match:
+                    # Clean up any markdown the LLM might have snuck inside the tags
+                    clean_code = match.group(1).replace("```java", "").replace("```", "").strip()
+                    cand_dict[sig] = clean_code
+                else:
+                    print(f"[⚠️] Warning: Could not parse method {sig} from candidate. Skipping this candidate.")
+                    break
+            
+            # Only add if we successfully parsed all methods in the cluster
+            if len(cand_dict) == len(cluster_sigs):
+                parsed_cands.append(cand_dict)
+                
+        if not parsed_cands:
+            print(f"[❌] Failed to parse any valid candidates for Cluster {cluster_idx + 1}.")
+            sys.exit(1)
+            
+        cluster_candidates[cluster_idx] = parsed_cands
+        print(f"  -> Extracted {len(parsed_cands)} valid interprocedural candidates for Cluster {cluster_idx + 1}.")
     else:
-        print(f"[❌] Failed to generate candidates for {sig}")
+        print(f"[❌] Failed to generate candidates for Cluster {cluster_idx + 1}")
         sys.exit(1)
 
-# === Step 5: TRUE Permutation Synthesis Engine ===
-print("\nAssembling all valid candidate combinations (Permutation Engine)...")
+# === Step 5: TRUE Permutation Synthesis Engine (Cluster-Level) ===
+print("\nAssembling all valid candidate combinations (Cluster Permutation Engine)...")
 
-method_signatures = list(conflicting_methods.keys())
-lists_of_candidates = [method_candidates[sig] for sig in method_signatures]
+lists_of_candidates = [cluster_candidates[i] for i in range(len(clusters))]
 all_combinations = list(itertools.product(*lists_of_candidates))
-# print("PERMUTATIONS: ",all_combinations)
 
 print(f"Generated {len(all_combinations)} unique permutations to test.")
 
 integrated_file_candidates = []
-combo_logs = [] # NEW: Track what is inside each permutation
+combo_logs = []
 
 for combo_idx, combo in enumerate(all_combinations, 1):
     new_file_code = base_code
     combo_description = {}
     
-    for i, sig in enumerate(method_signatures):
-        original_base_method = conflicting_methods[sig]["base"]
-        merged_method = combo[i]
+    # combo is a tuple of dictionaries, one dict per cluster
+    for cluster_idx, cluster_dict in enumerate(combo):
+        cand_num = cluster_candidates[cluster_idx].index(cluster_dict) + 1
         
-        # Track which candidate index was used for this method (1-indexed for readability)
-        candidate_num = method_candidates[sig].index(merged_method) + 1
-        combo_description[sig] = f"Candidate {candidate_num}"
-        
-        new_file_code = new_file_code.replace(original_base_method, merged_method)
-        
+        for sig, merged_method in cluster_dict.items():
+            original_base_method = conflicting_methods[sig]["base"]
+            new_file_code = new_file_code.replace(original_base_method, merged_method)
+            combo_description[sig] = f"Cluster {cluster_idx + 1} - Candidate {cand_num}"
+            
     integrated_file_candidates.append(new_file_code)
     combo_logs.append({"Permutation_ID": combo_idx, "Composition": combo_description})
 
-# === Step 6: Proceed to Tooling (Modified loop) ===
+# === Step 6: Proceed to Tooling ===
 print(f"\nRunning tooling and compilation on {len(integrated_file_candidates)} candidates...")
 
-run_results = [] # NEW: Store the success/failure logs
+run_results = []
 
 for i, candidate_code in enumerate(integrated_file_candidates, 1):
     run_num = i
@@ -165,7 +231,6 @@ for i, candidate_code in enumerate(integrated_file_candidates, 1):
         })
     except subprocess.CalledProcessError as e:
         print(f"❌ ERROR during tooling for Run #{run_num}: {e}")
-        # Capture the actual error output to feed to the LLM
         error_msg = e.stderr.strip() if e.stderr else "Unknown compilation/tooling error."
         run_results.append({
             "Permutation_ID": run_num,

@@ -66,3 +66,27 @@ def find_conflicting_methods(base_code, a_code, b_code):
                     "B": b_body
                 }
     return conflicts
+
+def get_method_name(sig):
+    # Extracts "calculateTotal" from "calculateTotal(int,int)"
+    return sig.split('(')[0].strip()
+
+def get_method_calls(java_code_string):
+    """
+    Parses a snippet of Java code and returns a set of all method names 
+    that are called (invoked) within it.
+    """
+    calls = set()
+    try:
+        # We wrap the snippet in a dummy class/method so javalang can parse it as valid Java
+        dummy_code = f"class Dummy {{ void dummyMethod() {{ {java_code_string} }} }}"
+        tree = javalang.parse.parse(dummy_code)
+        
+        for path, node in tree.filter(javalang.tree.MethodInvocation):
+            calls.add(node.member) # 'member' is the name of the method being called
+            
+    except Exception as e:
+        # If parsing fails, return empty set
+        pass
+        
+    return calls

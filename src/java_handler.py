@@ -84,35 +84,35 @@ def run_tooling_and_compile(run_directory: str, class_name: str, spoonrace_dir: 
         )
     print(f"   ... SpoonRace.jar completed successfully.")
 
-    print(f"⚙️  Compiling generated source files...")
-    JAVAC_23_EXECUTABLE = os.path.join(JAVA_13_HOME, 'bin', 'javac.exe')
+    # print(f"⚙️  Compiling generated source files...")
+    # JAVAC_23_EXECUTABLE = os.path.join(JAVA_13_HOME, 'bin', 'javac.exe')
     
-    suffixes = ["A", "B", "Base", "M"]
-    for suffix in suffixes:
-        spooned_folder = os.path.join(run_directory, f"{class_name}_{suffix}_Spooned")
+    # suffixes = ["A", "B", "Base", "M"]
+    # for suffix in suffixes:
+    #     spooned_folder = os.path.join(run_directory, f"{class_name}_{suffix}_Spooned")
         
-        if not os.path.exists(spooned_folder):
-            raise FileNotFoundError(f"Expected folder not found: {spooned_folder}")
+    #     if not os.path.exists(spooned_folder):
+    #         raise FileNotFoundError(f"Expected folder not found: {spooned_folder}")
 
-        # NEW: Dynamically find the .java file recursively, regardless of package nesting
-        search_pattern = os.path.join(spooned_folder, "**", f"{class_name}_{suffix}.java")
-        found_files = glob.glob(search_pattern, recursive=True)
+    #     # NEW: Dynamically find the .java file recursively, regardless of package nesting
+    #     search_pattern = os.path.join(spooned_folder, "**", f"{class_name}_{suffix}.java")
+    #     found_files = glob.glob(search_pattern, recursive=True)
         
-        if not found_files:
-            raise FileNotFoundError(f"Could not find {class_name}_{suffix}.java inside {spooned_folder}")
+    #     if not found_files:
+    #         raise FileNotFoundError(f"Could not find {class_name}_{suffix}.java inside {spooned_folder}")
             
-        java_file_path = found_files[0] # Grab the actual path to the nested file
+    #     java_file_path = found_files[0] # Grab the actual path to the nested file
 
-        with change_dir(spooned_folder):
-            # Pass the dynamically found file path to javac
-            compile_command = [JAVAC_23_EXECUTABLE, java_file_path]
-            subprocess.run(
-                compile_command,
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            print(f"   ✅ Compiled {os.path.basename(java_file_path)}")
+    #     with change_dir(spooned_folder):
+    #         # Pass the dynamically found file path to javac
+    #         compile_command = [JAVAC_23_EXECUTABLE, java_file_path]
+    #         subprocess.run(
+    #             compile_command,
+    #             check=True,
+    #             capture_output=True,
+    #             text=True
+    #         )
+    #         print(f"   ✅ Compiled {os.path.basename(java_file_path)}")
 
 
 def run_legacy_jar(path_to_jar: str):
